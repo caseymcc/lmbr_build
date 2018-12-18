@@ -30,46 +30,9 @@ POSSIBILITY OF SUCH DAMAGE.
 """
 
 """
-To add this tool to your project:
-def options(conf):
-	opt.load('msvs')
-
-It can be a good idea to add the sync_exec tool too.
-
-To generate solution files:
-$ waf configure msvs
-
-To customize the outputs, provide subclasses in your wscript files:
-
-from waflib.extras import msvs
-class vsnode_target(msvs.vsnode_target):
-	def get_build_command(self, props):
-		# likely to be required
-		return "waf.bat build"
-	def collect_source(self):
-		# likely to be required
-		...
-class msvs_bar(msvs.msvs_generator):
-	def init(self):
-		msvs.msvs_generator.init(self)
-		self.vsnode_target = vsnode_target
-
-The msvs class re-uses the same build() function for reading the targets (task generators),
-you may therefore specify msvs settings on the context object:
-
-def build(bld):
-	bld.solution_name = 'foo.sln'
-	bld.waf_command = 'waf.bat'
-	bld.projects_dir = bld.srcnode.make_node('foo.depproj')
-	bld.projects_dir.mkdir()
-
-For visual studio 2008, the command is called 'msvs2008', and the classes
-such as vsnode_target are wrapped by a decorator class 'wrap_2008' to
-provide special functionality.
-
-ASSUMPTIONS:
-* a project can be either a directory or a target, vcxproj files are written only for targets that have source files
-* each project is a vcxproj file, therefore the project uuid needs only to be a hash of the absolute path
+lumberyard.py
+ - add 'msvs_build' to NON_BUILD_COMMANDS
+ - add 'msvs_build:win32' to LMBR_WAFLIB_MODULES/LMBR_WAF_TOOL_DIR
 """
 
 import os, re, sys, errno, datetime, time
@@ -97,13 +60,26 @@ PROJECT_TEMPLATE = r'''<?xml version="1.0" encoding="UTF-8"?>
 	</ItemGroup>
 	<PropertyGroup Label="Globals">
 		<ProjectGuid>{${project.uuid}}</ProjectGuid>
-		<Keyword>MakefileProj</Keyword>
+		<Keyword>Win32Proj</Keyword>
+        <Platform>${b.platform.split()[0]}</Platform>
 		<ProjectName>${project.name}</ProjectName>
 	</PropertyGroup>
 	<Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
 	${for b in project.build_properties}
 		<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='${b.configuration}|${b.platform.split()[0]}'" Label="Configuration">
-			<ConfigurationType>Makefile</ConfigurationType>
+			<ConfigurationType>
+            ${if hasattr(b, 'output_type')}
+                ${if b.output_type == 'exe'}
+                    Application
+                ${elif b.output_type == 'dll'}
+                    DynamicLibrary
+                ${elif b.output_type == 'lib'}
+                    StaticLibrary
+                ${endif}
+            ${else}
+                Utility
+            ${endif}
+            </ConfigurationType>
 			<OutDir>${b.outdir}</OutDir>
 			${if b.platform == 'ARM'}
 				<Keyword>Android</Keyword>
@@ -121,26 +97,129 @@ PROJECT_TEMPLATE = r'''<?xml version="1.0" encoding="UTF-8"?>
 		<Import Project="$(MSBuildProjectDirectory)\$(MSBuildProjectName).vcxproj.default.props" Condition="exists('$(MSBuildProjectDirectory)\$(MSBuildProjectName).vcxproj.default.props')"/>
 		<Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
 	</ImportGroup>
+    <PropertyGroup>
+        <_ProjectFileVersion>10.0.20506.1</_ProjectFileVersion>
+    ${for b in project.build_properties}
+        ${if hasattr(b, 'output_type')}
+            <OutDir Condition="'$(Configuration)|$(Platform)'=='${b.configuration}|${b.platform.split()[0]}'">${b.outdir}</OutDir>
+            <IntDir Condition="'$(Configuration)|$(Platform)'=='${b.configuration}|${b.platform.split()[0]}'">${b.assembly_name}.dir\${b.configuration}\</IntDir>
+            <TargetName Condition="'$(Configuration)|$(Platform)'=='${b.configuration}|${b.platform.split()[0]}'">${b.output_file_name}</TargetName>
+            <TargetExt Condition="'$(Configuration)|$(Platform)'=='${b.configuration}|${b.platform.split()[0]}'">.${b.output_type}</TargetExt>
+            <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='${b.configuration}|${b.platform.split()[0]}'">true</LinkIncremental>
+            <GenerateManifest Condition="'$(Configuration)|$(Platform)'=='${b.configuration}|${b.platform.split()[0]}'">true</GenerateManifest>
+        ${endif}
+    ${endfor}
+    </PropertyGroup>
 	${for b in project.build_properties}
-		<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='${b.configuration}|${b.platform.split()[0]}'">
+		<ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='${b.configuration}|${b.platform.split()[0]}'">
             <ClCompile>
+                ${if '/nologo' not in b.cxx_flags}
+                    <SuppressStartupBanner>No</SuppressStartupBanner>
+                ${endif}
                 <AdditionalIncludeDirectories>${xml:b.includes_search_path}</AdditionalIncludeDirectories>
-                <AdditionalOptions>%(AdditionalOptions) /bigobj</AdditionalOptions>
-                <AssemblerListingLocation>Debug/</AssemblerListingLocation>
+                ${if '/bigobj' in b.cxx_flags}
+                    <AdditionalOptions>%(AdditionalOptions) /bigobj</AdditionalOptions>
+                ${endif}
+                <AssemblerListingLocation>${b.configuration}/</AssemblerListingLocation>
                 <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
                 <CompileAs>CompileAsCpp</CompileAs>
                 <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
                 <ExceptionHandling>Sync</ExceptionHandling>
-                <InlineFunctionExpansion>Disabled</InlineFunctionExpansion>
-                <Optimization>Disabled</Optimization>
+                <Optimization>
+                ${if '/Ox' in b.cxx_flags}
+                    Full
+                ${elif '/O2' in b.cxx_flags}
+                    MaxSpeed
+                ${elif '/O1' in b.cxx_flags}
+                    MinSpace
+                ${elif '/Od' in b.cxx_flags}
+                    Disabled
+                ${endif}
+                </Optimization>
+                ${if '/Ox' in b.cxx_flags}
+                    <InlineFunctionExpansion>
+                    ${if '/Ob1' in b.cxx_flags}
+                        OnlyExplicitInline
+                    ${elif '/Ob0' in b.cxx_flags}
+                        Disabled
+                    ${else}
+                        AnySuitable
+                    ${endif}
+                    </InlineFunctionExpansion>
+                    <IntrinsicFunctions>
+                    ${if '/Oi' in b.cxx_flags}
+                        true
+                    ${else}
+                        false
+                    ${endif}
+                    </IntrinsicFunctions>
+                    <OmitFramePointers>
+                    ${if '/Oy' in b.cxx_flags}
+                        true
+                    ${else}
+                        false
+                    ${endif}
+                    </OmitFramePointers>
+                    <FavorSizeOrSpeed>
+                    ${if '/Os' in b.cxx_flags}
+                        Size
+                    ${else}
+                        Speed
+                    ${endif}
+                    </FavorSizeOrSpeed>
+                ${endif}
+                ${if '/GL' in b.cxx_flags}
+                    <WholeProgramOptimization>true</WholeProgramOptimization>
+                ${endif}
                 <PrecompiledHeader>NotUsing</PrecompiledHeader>
+                ${if '/Od' in b.cxx_flags}
                 <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
-                <RuntimeTypeInfo>true</RuntimeTypeInfo>
-                <WarningLevel>Level3</WarningLevel>
+                ${else}
+                <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+                ${endif}
+                <RuntimeTypeInfo>
+                ${if '/GR-' in b.cxx_flags}
+                    false
+                ${else}
+                    true
+                ${endif}
+                </RuntimeTypeInfo>
+                ${if '/Wd' in b.cxx_flags}
+                    ${disabled_warnings=re.findall("/Wd(\d\d\d\d)", b.cxx_flags)}
+                    <DisableSpecificWarnings>${';'.join(disabled_warnings)}</DisableSpecificWarnings>
+                {endif}
+                <WarningLevel>
+                ${if '/W4' in b.cxx_flags}
+                    Level4
+                ${elif '/W3' in b.cxx_flags}
+                    Level3
+                ${elif '/W2' in b.cxx_flags}
+                    Level2
+                ${elif '/W1' in b.cxx_flags}
+                    Level1
+                ${elif '/W0' in b.cxx_flags}
+                    Level0
+                ${endif}
+                </WarningLevel>
                 <PreprocessorDefinitions>${xml:b.preprocessor_definitions};%(PreprocessorDefinitions)</PreprocessorDefinitions>
                 <ObjectFileName>$(IntDir)</ObjectFileName>
+                ${if '/fp:fast' in b.cxx_flags}
+                    <FloatingPointModel>Fast</FloatingPointModel>
+                ${endif}
+                ${if '/Zc:wchar_t' not in b.cxx_flags}
+                    <TreatWChar_tAsBuiltInType>false</TreatWChar_tAsBuiltInType>
+                ${endif}
+                ${if '/Zc:forScope' not in b.cxx_flags}
+                    <ForceConformanceInForLoopScope>false</ForceConformanceInForLoopScope>
+                ${endif}
+                ${if '/Zc:inline' not in b.cxx_flags}
+                    <RemoveUnreferencedCodeData>false</RemoveUnreferencedCodeData>
+                ${endif}
+                ${if '/GF-' in b.cxx_flags}
+                    <StringPooling>false</StringPooling>
+                ${endif}
             </ClCompile>
-		</PropertyGroup>
+		</ItemDefinitionGroup>
 	${endfor}
 	${for b in project.build_properties}
 		${if getattr(b, 'deploy_dir', None)}
@@ -323,9 +402,9 @@ COMPILE_TEMPLATE = '''def f(project):
 
 	%s
 
-	#f = open('cmd.txt', 'w')
-	#f.write(str(lst))
-	#f.close()
+	f = open('cmd.txt', 'w')
+	f.write(str(lst))
+	f.close()
 	return ''.join(lst)
 '''
 
@@ -779,7 +858,7 @@ class vsnode_project(vsnode):
         _write(PROJECT_TEMPLATE, self.path)
         _write(FILTER_TEMPLATE, self.path.parent.make_node(self.path.name + '.filters'))
         _write(PROJECT_USER_TEMPLATE, self.path.parent.make_node(self.path.name + '.user'))
-        _write(PROPERTY_SHEET_TEMPLATE, self.path.parent.make_node(self.path.name + '.default.props'))
+        #_write(PROPERTY_SHEET_TEMPLATE, self.path.parent.make_node(self.path.name + '.default.props'))
 
     def get_key(self, node):
         """
@@ -1474,14 +1553,14 @@ for msvs_key in SUPPORTED_MSVS_VALUE_TABLE.keys():
         PLATFORM_TO_SUPPORTED_MSVS_DICT[platform] = msvs_key
 
 
-class msvs_generator(BuildContext):
+class msvs_build_generator(BuildContext):
     """
-    Generates a Visual Studio solution
+    Generates a Visual Studio solution, with MSBuild (instead of waf buid)
     """
     after = ['gen_spec_use_map_file']
 
     '''generates a visual studio solution'''
-    cmd = 'msvs'
+    cmd = 'msvs_build'
     fun = 'build'
 
     def init(self):
@@ -1614,10 +1693,10 @@ class msvs_generator(BuildContext):
         if not getattr(self, 'project_extension', None):
             self.project_extension = '.vcxproj'
         if not getattr(self, 'projects_dir', None):
-            self.projects_dir = self.srcnode.make_node(self.get_solution_dep_proj_folder_name(self.msvs_version))
+            self.projects_dir = self.srcnode.make_node(self.get_build_solution_dep_proj_folder_name(self.msvs_version))
             self.projects_dir.mkdir()
         if not getattr(self, 'solution_name', None):
-            self.solution_name = self.get_solution_name(self.msvs_version)
+            self.solution_name = self.get_build_solution_name(self.msvs_version)
         # bind the classes to the object, so that subclass can provide custom generators
         if not getattr(self, 'vsnode_vsdir', None):
             self.vsnode_vsdir = vsnode_vsdir
@@ -1645,7 +1724,7 @@ class msvs_generator(BuildContext):
             self.load_envs()
 
         self.load_user_settings()
-        Logs.info("[WAF] Executing 'msvs' in '%s'" % (self.variant_dir)	)
+        Logs.info("[WAF] Executing 'msvs_build' in '%s'" % (self.variant_dir)	)
         self.recurse([self.run_dir])
 
         # user initialization
